@@ -1,0 +1,29 @@
+# Dependencies and builds
+node_modules/
+dist/
+coverage/
+*.log
+.DS_Store
+.env
+.env.*
+!.env.example
+.npmrc
+*.pem
+*.key
+
+# Local-only test media, personal screenshots, and internal notes
+audit/
+output/
+design/
+.playwright-cli/
+.test-media/
+.publish/
+PROJECT-SUMMARY.md
+MANUAL-TEST-CHECKLIST.md
+design-qa.md
+src/assets/editor-reference.jpg
+public/assets/
+
+# Editors
+.idea/
+.vscode/
