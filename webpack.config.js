@@ -7,6 +7,8 @@ const TerserPlugin = require('terser-webpack-plugin');
 
 module.exports = (env, argv) => {
   const isDev = argv.mode !== 'production';
+  // Keep localhost at /; static hosts can supply their project subdirectory.
+  const publicPath = isDev ? '/' : (process.env.PUBLIC_PATH || '/');
 
   return {
     mode: argv.mode || 'development',
@@ -14,7 +16,7 @@ module.exports = (env, argv) => {
     output: {
       path: path.resolve(__dirname, 'dist'),
       filename: isDev ? '[name].js' : '[name].[contenthash:8].js',
-      publicPath: '/',
+      publicPath,
     },
     resolve: {
       extensions: ['.tsx', '.ts', '.mjs', '.cjs', '.js'],

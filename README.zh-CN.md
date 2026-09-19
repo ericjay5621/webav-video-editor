@@ -1,6 +1,6 @@
 # WebAV Video Editor · 浏览器视频编辑器
 
-[English](README.md) · [参与贡献](CONTRIBUTING.md) · [MIT 许可证](LICENSE)
+[在线体验](https://ericjay5621.github.io/webav-video-editor/) · [English](README.md) · [参与贡献](CONTRIBUTING.md) · [MIT 许可证](LICENSE)
 
 基于 React、TypeScript、WebAV 和 WebCodecs 的本地视频编辑 Demo。可以在浏览器里导入素材、编辑时间轴、添加字幕和转场，最后导出 MP4。当前实现不需要上传媒体，也不依赖服务端渲染或 API Key。
 
@@ -25,6 +25,8 @@
 导入只增加素材库条目。只有时间轴中的内容参与最终导出。删除素材库条目前会提示受影响的片段数量；电脑上的原文件保留。
 
 ## 启动
+
+无需安装即可打开[在线演示](https://ericjay5621.github.io/webav-video-editor/)。使用桌面 Chrome / Edge，导入自己的短测试文件开始体验。素材在当前浏览器中处理；线上草稿与 localhost 的草稿相互独立。下文列出的实验性边界同样适用于线上版本。
 
 需要 Node.js 22、npm，以及支持 WebCodecs 的桌面 Chrome / Edge。建议先用短时 H.264/AAC MP4 测试。
 
@@ -69,6 +71,8 @@ NODE_OPTIONS=--openssl-legacy-provider npm run build
 ```
 
 PowerShell 先按上文设置环境变量，再运行 `npm run build`。输出目录为 `dist/`。部署时使用 HTTPS，并将文件放在站点根路径。开发服务器只用于本地调试。
+
+部署到子路径时，可设置 `PUBLIC_PATH=/webav-video-editor/`。仓库的 [Pages 工作流](.github/workflows/deploy-pages.yml) 会读取站点路径，在 `main` 的源码变更后检查、构建并发布 `dist/`。本地开发仍使用根路径和 `8092` 端口。部署与回滚说明见 [DEPLOYMENT.md](DEPLOYMENT.md)。
 
 `npm test` 包含四组逻辑回归检查，部分媒体对象使用模拟实现，不能替代真实浏览器的解码、播放和导出测试。
 

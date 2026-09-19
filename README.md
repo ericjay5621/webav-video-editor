@@ -2,7 +2,7 @@
 
 ### Edit video in your browser. Keep your media on your machine.
 
-[中文文档](README.zh-CN.md) · [Quick start](#quick-start) · [Features](#features) · [Contributing](CONTRIBUTING.md)
+[Live demo](https://ericjay5621.github.io/webav-video-editor/) · [中文文档](README.zh-CN.md) · [Quick start](#quick-start) · [Features](#features) · [Contributing](CONTRIBUTING.md)
 
 A local-first video editing workbench built with **React, TypeScript, WebAV and WebCodecs**. Import media, arrange a timeline, add captions and transitions, then export an MP4 in the browser. No media-upload API or rendering server is required.
 
@@ -32,6 +32,8 @@ A local-first video editing workbench built with **React, TypeScript, WebAV and 
 | Drafts & export | Local browser draft persistence and MP4 export from the timeline |
 
 ## Quick start
+
+Try the [online editor](https://ericjay5621.github.io/webav-video-editor/) without installing anything. Import your own short test file; media processing stays in your browser. Drafts on this hosted origin are separate from localhost drafts. The experimental limitations below apply to the demo too.
 
 Use desktop Chrome or Edge with WebCodecs support. Codec availability also depends on the OS and hardware. Start with a short H.264/AAC MP4. Run the app on localhost or HTTPS, not by opening `index.html` directly.
 
@@ -100,6 +102,8 @@ NODE_OPTIONS=--openssl-legacy-provider npm run build
 ```
 
 On PowerShell, set `NODE_OPTIONS` as above and run `npm run build`. The bundle is written to `dist/`; serve it at the root of an HTTPS origin. Do not expose the legacy development server publicly.
+
+For subdirectory hosting, set `PUBLIC_PATH` to the path including its trailing slash, e.g. `/webav-video-editor/`. The [Pages workflow](.github/workflows/deploy-pages.yml) reads this path from GitHub Pages, checks and builds the source on `main`, and deploys only `dist/`. See [DEPLOYMENT.md](DEPLOYMENT.md) for setup and rollback.
 
 `npm test` runs four regression scripts for import ordering, asset deletion, trim undo/redo and timeline layout. Some tests use media doubles; they do not prove real decoding or audible playback on every browser.
 
