@@ -38,3 +38,15 @@ The mismatch is an observed pixel-comparison failure. Its cause has not been iso
 - Production JavaScript is approximately 589 KiB uncompressed, above Webpack's recommended asset-size threshold.
 - Installation reports deprecated packages in the legacy build toolchain. A security audit or dependency upgrade was not performed as part of publication.
 - Windows, other browsers, very large files and long exports were not revalidated for this publication.
+
+## Hosted demo smoke check — 2026-09-19
+
+- URL: https://ericjay5621.github.io/webav-video-editor/
+- Deployed source: `ac57035c9648b5a174866df34590f04669e30166`.
+- [GitHub Actions build and deployment](https://github.com/ericjay5621/webav-video-editor/actions/runs/35431576074) both succeeded, including type checking and all four logic regression scripts.
+- HTTPS HTML, JavaScript and CSS requests returned HTTP 200 with the correct project-subdirectory paths.
+- Desktop Chrome UI: imported the generated 8-second H.264/AAC MP4. Import alone left the timeline empty; Add created a clip and rendered the test pattern. Playback advanced to the end.
+- Export downloaded an MP4 containing H.264 1280x720 video and AAC 48 kHz stereo audio, with duration 8.128 seconds. FFmpeg decoded the entire downloaded file without errors. This checks file integrity, not subjective audio quality or every editing feature.
+- Saved the hosted draft, reloaded, and confirmed restoration of the asset, timeline duration and moving preview.
+- Removed only the synthetic test asset through the editor and saved an empty hosted draft. The original local editor draft and all source media were left untouched.
+- This smoke check does not resolve or supersede the two browser-suite findings above.
