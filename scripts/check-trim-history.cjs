@@ -32,6 +32,32 @@ class Sprite {
   setAnimation() {}
   destroy() { this.clip.destroy(); this.closed = true; }
 }
+class Canvas {
+  constructor() { this.sprites = new Set(); this.listeners = {}; this.selected = null; this.clearedByPreview = 0; }
+  on(type, listener) { (this.listeners[type] ||= []).push(listener); return () => {}; }
+  emit(type, value) { (this.listeners[type] || []).forEach(listener => listener(value)); }
+  get activeSprite() { return this.selected; }
+  set activeSprite(sprite) {
+    if (sprite === this.selected || sprite?.interactable === 'disabled') return;
+    this.selected = sprite;
+    this.emit('activeSpriteChange', sprite);
+  }
+  pause() {}
+  async addSprite(sprite) { assert.ok(!sprite.closed, 'cannot reattach a destroyed sprite'); this.sprites.add(sprite); }
+  removeSprite(sprite) {
+    if (this.activeSprite === sprite) this.activeSprite = null;
+    this.sprites.delete(sprite); sprite.destroy();
+  }
+  async previewFrame(time) {
+    // Installed AVCanvas clears activeSprite when updateRenderTime moves outside it.
+    const sprite = this.activeSprite;
+    if (sprite && (time < sprite.time.offset || time > sprite.time.offset + sprite.time.duration)) {
+      this.clearedByPreview += 1;
+      this.activeSprite = null;
+    }
+    for (const sprite of this.sprites) await sprite.getClip().tick(1e6);
+  }
+}
 const modules = {};
 function load(name) {
   if (modules[name]) return modules[name];
@@ -40,6 +66,7 @@ function load(name) {
   const js = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2018 } }).outputText;
   new Function('exports', 'require', js)(exports, dependency => {
     if (dependency === '@webav/av-cliper') return { VisibleSprite: Sprite, MP4Clip: class {}, AudioClip: class {} };
+    if (dependency === '@webav/av-canvas') return { AVCanvas: Canvas };
     if (dependency.startsWith('@webav/')) return {};
     if (/\.(jpg|png)$/.test(dependency)) return 'test-image';
     if (dependency === './mediaAssets') return {};
@@ -49,15 +76,9 @@ function load(name) {
 }
 const { WebAVRuntime } = load('WebAVRuntime');
 const callbacks = Object.fromEntries(['onItemsChange','onSelectionChange','onPropertiesChange','onTimeChange','onPlayingChange','onHistoryChange','onMessage'].map(key => [key, () => {}]));
-function setup(kind, linked = false, rate = 1) {
+async function setup(kind, linked = false, rate = 1) {
   const runtime = new WebAVRuntime(callbacks);
-  const active = new Set();
-  // Match installed WebAV ownership: removal destroys the sprite and decoder.
-  runtime.canvas = {
-    pause() {}, async addSprite(sprite) { assert.ok(!sprite.closed, 'cannot reattach a destroyed sprite'); active.add(sprite); },
-    removeSprite(sprite) { active.delete(sprite); sprite.destroy(); },
-    async previewFrame() { for (const sprite of active) await sprite.getClip().tick(1e6); },
-  };
+  await runtime.mount({});
   const item = (id, type, link) => ({ id, name: id, kind: type, sprite: new Sprite(new Clip(type, 8e6)),
     sourceStartUs: 0, audioWaveform: [0.1,0.4,0.6,0.2], draftSource: { type:'file', blob:{ duration:8e6 } }, audioLinkId:link });
   runtime.items = [item('first', kind, linked ? 'pair1' : undefined)];
@@ -65,13 +86,12 @@ function setup(kind, linked = false, rate = 1) {
   runtime.items.push(item('second', 'video', 'pair2'), item('second-original', 'audio', 'pair2'));
   runtime.items.forEach((item, index) => {
     item.sprite.time = { offset: index < (linked ? 2 : 1) ? 8e6 : 24e6, duration:8e6 / rate, playbackRate:rate };
-    active.add(item.sprite);
+    runtime.canvas.sprites.add(item.sprite);
   });
   runtime.createClipFromDraftSource = async (kind, source) => new Clip(kind, source.blob.duration);
   runtime.bindClipEffects = () => {};
-  runtime.readProperties = id => { const item = runtime.items.find(item => item.id === id); return { start:item.sprite.time.offset / 1e6, duration:item.sprite.time.duration / 1e6 }; };
   runtime.currentTimeUs = 9e6;
-  runtime.selectedId = 'first';
+  runtime.select('first');
   return runtime;
 }
 const snapshot = runtime => runtime.items.map(item => ({ id:item.id, time:{...item.sprite.time}, rect:{...item.sprite.rect}, sourceStartUs:item.sourceStartUs, waveform:item.audioWaveform.slice(), opacity:item.sprite.opacity }));
@@ -85,7 +105,7 @@ async function assertMedia(runtime) {
 async function run() {
   for (const [kind, linked] of [['video',true], ['audio',false], ['image',false]]) {
     for (const edge of ['start','end']) {
-      const runtime = setup(kind, linked);
+      const runtime = await setup(kind, linked);
       const before = snapshot(runtime);
       await runtime.trimItem('first', edge, edge === 'start' ? 10e6 : 8e6, 6e6);
       const after = snapshot(runtime);
@@ -109,7 +129,7 @@ async function run() {
       await assertMedia(runtime);
     }
   }
-  const fast = setup('video', true, 2);
+  const fast = await setup('video', true, 2);
   await fast.trimItem('first', 'start', 9e6, 3e6);
   assert.strictEqual(fast.items[0].sourceStartUs, 2e6);
   await fast.undo(); await assertMedia(fast); await fast.redo(); await assertMedia(fast);
@@ -118,7 +138,7 @@ async function run() {
   assert.strictEqual(fast.redoStack.length, 1);
   await assertMedia(fast);
   // A failed linked decoder must leave both live clips and the undo entry intact.
-  const failure = setup('video', true);
+  const failure = await setup('video', true);
   await failure.trimItem('first', 'end', 8e6, 6e6);
   const trimmed = snapshot(failure);
   const create = failure.createClipFromDraftSource;
@@ -130,6 +150,36 @@ async function run() {
   assert.ok(clips.slice(clipCount).every(clip => clip.closed), 'release uncommitted replacements after failure');
   failure.createClipFromDraftSource = create;
   await failure.undo(); await assertMedia(failure);
-  console.log('PASS: video/original, MP3, image; left/right trim; undo/redo x3 with media reads; consecutive trims; 2x rate; concurrent undo; linked failure rollback and retry');
+  for (const kind of ['video', 'audio', 'image']) {
+    const runtime = await setup(kind);
+    const original = runtime.items[0];
+    const before = snapshot(runtime);
+    const splitUs = 12e6 + 0.25;
+    await runtime.seek(splitUs);
+    await runtime.splitSelected();
+    const parts = runtime.items.slice(0, 2);
+    const after = snapshot(runtime);
+    assert.strictEqual(runtime.getSelectedId(), parts[1].id, `${kind}: split selects the right half`);
+    // AVCanvas's timer rounds timeupdate to integer microseconds. A fractional
+    // split boundary can then sit just after the playhead during history seek.
+    runtime.canvas.emit('timeupdate', Math.round(splitUs));
+    for (let round = 0; round < 3; round++) {
+      await runtime.undo();
+      assert.deepStrictEqual(snapshot(runtime), before);
+      assert.strictEqual(runtime.getSelectedId(), original.id, `${kind}: undo selects the original`);
+      await assertMedia(runtime);
+      await runtime.redo();
+      assert.deepStrictEqual(snapshot(runtime), after);
+      assert.strictEqual(runtime.getSelectedId(), parts[1].id, `${kind}: redo selects the right half after rounded timeupdate`);
+      assert.strictEqual(runtime.canvas.activeSprite, kind === 'audio' ? null : parts[1].sprite);
+      await assertMedia(runtime);
+    }
+    if (kind !== 'audio') assert.ok(runtime.canvas.clearedByPreview > 0, 'exercise AVCanvas selection clearing');
+    await runtime.replaceTimelineItems([], [], null, 8e6);
+    assert.strictEqual(runtime.getSelectedId(), null, 'no-selection history stays unselected');
+    await runtime.replaceTimelineItems([], [], 'missing-item', 8e6);
+    assert.strictEqual(runtime.getSelectedId(), null, 'history cannot select an absent item');
+  }
+  console.log('PASS: video/original, MP3, image; left/right trim; undo/redo x3 with media reads; consecutive trims; 2x rate; concurrent undo; linked failure rollback and retry; fractional split history selection x3; audio and absent selection');
 }
 run().catch(error => { console.error(error); process.exitCode = 1; });

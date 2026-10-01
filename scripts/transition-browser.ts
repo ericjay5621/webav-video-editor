@@ -1,6 +1,6 @@
 // Run with: NODE_OPTIONS=--openssl-legacy-provider node scripts/serve-trim-history-test.cjs transition-browser.ts
 // Real canvas/MP4 checks. This page never opens the editor's draft database.
-import { MP4Clip } from '@webav/av-cliper';
+import { MP4Clip, OffscreenSprite } from '@webav/av-cliper';
 import { WebAVRuntime } from '../src/editor/WebAVRuntime';
 import { EditorItem, TransitionType } from '../src/editor/types';
 import { TRANSITIONS } from '../src/editor/transitions';
@@ -33,6 +33,10 @@ function samples(canvas: HTMLCanvasElement, points = [0.02, 0.25, 0.75]) {
     Math.floor(canvas.width * x), Math.floor(canvas.height / 2), 1, 1,
   ).data).slice(0, 3));
 }
+const movingPoints = [.35, .45, .65];
+function pixelsMatch(preview: number[][], encoded: number[][]) {
+  return preview.every((rgb, i) => rgb.every((value, j) => Math.abs(value - encoded[i][j]) < 25));
+}
 function checkFrame(type: TransitionType, pixels: number[][], label: string) {
   const [edge, left, right] = pixels;
   const red = (rgb: number[]) => rgb[0] > 200 && rgb[2] < 25;
@@ -54,9 +58,84 @@ async function decode(item: EditorItem) {
   }
 }
 
+async function diagnoseMovingFrame(runtime: WebAVRuntime, times: number[]) {
+  const probes: object[] = [];
+  for (const time of times) {
+    const canvas = document.createElement('canvas'); canvas.width = 1280; canvas.height = 720;
+    const context = canvas.getContext('2d')!;
+    context.fillStyle = '#050608'; context.fillRect(0, 0, canvas.width, canvas.height);
+    const sources: object[] = [];
+    for (const item of runtime.getItems()) {
+      if (time < item.sprite.time.offset || time > item.sprite.time.offset + item.sprite.time.duration) continue;
+      const localTime = (time - item.sprite.time.offset) * item.sprite.time.playbackRate;
+      const raw = await (runtime as any).createExportClip(item);
+      await raw.ready;
+      raw.tickInterceptor = async (_time: number, result: unknown) => result;
+      const tick = await raw.tick(localTime);
+      const sourceCanvas = document.createElement('canvas');
+      sourceCanvas.width = raw.meta.width; sourceCanvas.height = raw.meta.height;
+      if (tick.video) sourceCanvas.getContext('2d')!.drawImage(tick.video, 0, 0);
+      sources.push({ localTime, timestamp: tick.video?.timestamp, duration: tick.video?.duration,
+        pixels: samples(sourceCanvas, [.7, .9, .3]), sourceStartUs: item.sourceStartUs,
+        rect: { x: item.sprite.rect.x, y: item.sprite.rect.y, w: item.sprite.rect.w, h: item.sprite.rect.h } });
+      tick.video?.close(); raw.destroy();
+      const clip = await (runtime as any).createExportClip(item);
+      (runtime as any).bindClipEffectsToClip(item, clip);
+      const sprite = new OffscreenSprite(clip); await sprite.ready; item.sprite.copyStateTo(sprite);
+      context.save(); await sprite.offscreenRender(context, time - item.sprite.time.offset); context.restore();
+      sprite.destroy();
+    }
+    probes.push({ time, sources, pixels: samples(canvas, movingPoints) });
+  }
+  return probes;
+}
+
+async function compareMovingExport(runtime: WebAVRuntime, blob: Blob, label: string, requestedTimes: number[]) {
+  const exported = new MP4Clip(blob.stream()); await exported.ready;
+  const frames: object[] = [];
+  const failures: string[] = [];
+  try {
+    for (const requestedTimeUs of requestedTimes) {
+      await runtime.seek(requestedTimeUs); await delay(200);
+      const canvas = document.querySelector('#canvas canvas') as HTMLCanvasElement;
+      const unalignedPreview = samples(canvas, movingPoints);
+      const prime = await exported.tick(requestedTimeUs - 1e5); prime.video?.close();
+      const tick = await exported.tick(requestedTimeUs);
+      check(tick.video, `${label}: exported MP4 source has no frame`);
+      check(tick.audio?.some(channel => channel.some(value => Math.abs(value) > .001)), `${label}: exported audio missing`);
+      const encodedTimeUs = tick.video!.timestamp;
+      const decodedCanvas = document.createElement('canvas'); decodedCanvas.width = 1280; decodedCanvas.height = 720;
+      decodedCanvas.getContext('2d')!.drawImage(tick.video!, 0, 0, 1280, 720);
+      const encoded = samples(decodedCanvas, movingPoints);
+      tick.video?.close();
+      // A tick returns the encoded frame covering the request. WebAV 1.2.8 uses
+      // rounded 33333us export steps, so e.g. 1600000us returns the 1599984us
+      // frame. Moving edges can change source frames across that 16us boundary.
+      // Compare preview at the returned presentation timestamp, not the request.
+      check(encodedTimeUs <= requestedTimeUs && requestedTimeUs - encodedTimeUs < 1e6 / 30,
+        `${label}: unexpected exported timestamp ${encodedTimeUs} for ${requestedTimeUs}`);
+      await runtime.seek(encodedTimeUs); await delay(200);
+      const preview = samples(canvas, movingPoints);
+      frames.push({ requestedTimeUs, encodedTimeUs, unalignedPreview, preview, encoded,
+        unalignedMatch: pixelsMatch(unalignedPreview, encoded) });
+      if (!pixelsMatch(preview, encoded)) {
+        report.push({ mp4Mismatch: label, frames,
+          diagnostic: await diagnoseMovingFrame(runtime, [encodedTimeUs, requestedTimeUs]) });
+      }
+      try {
+        check(pixelsMatch(preview, encoded),
+          `${label}: aligned MP4 preview/export mismatch ${JSON.stringify({ requestedTimeUs, encodedTimeUs, preview, encoded })}`);
+      } catch (error) { failures.push(String(error)); }
+    }
+  } finally { exported.destroy(); }
+  check(failures.length === 0, failures.join('\n'));
+  return frames;
+}
+
 (document.getElementById('run') as HTMLButtonElement).onclick = async () => {
   (document.getElementById('run') as HTMLButtonElement).disabled = true;
   const runtime = createRuntime();
+  const failures: Array<{ label: string; error: string }> = [];
   let restored: WebAVRuntime | undefined;
   try {
     await runtime.mount(document.getElementById('canvas')!);
@@ -159,34 +238,45 @@ async function decode(item: EditorItem) {
     }
     const videos = runtime.getItems().filter(item => item.kind === 'video');
     runtime.select(videos[1].id);
+    let pixelComparisonsPassed = 0;
     for (const { type } of TRANSITIONS) {
       output.textContent = `RUNNING: MP4 ${type} playback/undo/export`;
       await runtime.applyTransition(type, .8);
-      await runtime.seek(1.6e6); await delay(200);
-      const preview = samples(document.querySelector('#canvas canvas') as HTMLCanvasElement, [.35, .45, .65]);
       const combinator = await (runtime as any).createExportCombinator();
       const blob = await new Response(combinator.output()).blob(); combinator.destroy();
-      const exported = new MP4Clip(blob.stream()); await exported.ready;
-      const prime = await exported.tick(1.5e6); prime.video?.close();
-      const tick = await exported.tick(1.6e6);
-      check(tick.video, `${type}: exported MP4 source has no frame`);
-      check(tick.audio?.some(channel => channel.some(value => Math.abs(value) > .001)), `${type}: exported audio missing`);
-      const decodedCanvas = document.createElement('canvas'); decodedCanvas.width = 1280; decodedCanvas.height = 720;
-      decodedCanvas.getContext('2d')!.drawImage(tick.video!, 0, 0, 1280, 720);
-      const encoded = samples(decodedCanvas, [.35, .45, .65]);
-      tick.video?.close(); exported.destroy();
-      check(preview.every((rgb, i) => rgb.every((value, j) => Math.abs(value - encoded[i][j]) < 25)),
-        `${type}: MP4 preview/export mismatch ${JSON.stringify({ preview, encoded })}`);
+      let frames: object[] = [];
+      let pixelComparisonPassed = false;
+      try {
+        frames = await compareMovingExport(runtime, blob, type, [1.4e6, 1.6e6, 1.8e6]);
+        pixelComparisonPassed = true; pixelComparisonsPassed += 1;
+      } catch (error) { failures.push({ label: type, error: String(error) }); }
       for (let round = 0; round < 2; round++) {
         await runtime.undo(); await decode(videos[0]); await decode(videos[1]);
         await runtime.redo(); await decode(videos[0]); await decode(videos[1]);
       }
       await runtime.removeTransition();
-      report.push({ mp4Type: type, preview, encoded, audioDecoded: true, exportedBytes: blob.size });
+      report.push({ mp4Type: type, pixelComparisonPassed, frames, exportedBytes: blob.size,
+        undoRedoCycles: 2, historyAudioDecoded: true });
     }
-    report.push({ mp4Transitions: 5, embeddedAudioDecoded: true, undoRedoCyclesEach: 2 });
-    output.textContent = JSON.stringify({ status: 'PASS', checks: report }, null, 2);
+    report.push({ mp4TransitionsAttempted: TRANSITIONS.length, pixelComparisonsPassed,
+      historyAudioDecoded: true, undoRedoCyclesEach: 2 });
+    output.textContent = 'RUNNING: source-trimmed MP4 push-right preview/export';
+    await runtime.trimItem(videos[1].id, 'start', 2.3e6, 1.7e6);
+    await runtime.moveItem(videos[1].id, 2e6);
+    check(videos[1].sourceStartUs === .3e6, 'source-trimmed transition fixture lost its source offset');
+    runtime.select(videos[1].id); await runtime.applyTransition('push-right', .8);
+    const trimmedCombinator = await (runtime as any).createExportCombinator();
+    const trimmedBlob = await new Response(trimmedCombinator.output()).blob(); trimmedCombinator.destroy();
+    let trimmedFrames: object[] = [];
+    let trimmedPixelComparisonPassed = false;
+    try {
+      trimmedFrames = await compareMovingExport(runtime, trimmedBlob, 'source-trimmed push-right', [1.4e6, 1.6e6, 1.8e6]);
+      trimmedPixelComparisonPassed = true;
+    } catch (error) { failures.push({ label: 'source-trimmed push-right', error: String(error) }); }
+    report.push({ mp4Type: 'push-right', sourceStartUs: videos[1].sourceStartUs,
+      frames: trimmedFrames, pixelComparisonPassed: trimmedPixelComparisonPassed, exportedBytes: trimmedBlob.size });
+    output.textContent = JSON.stringify({ status: failures.length ? 'FAIL' : 'PASS', failures, checks: report }, null, 2);
   } catch (error) {
-    output.textContent = JSON.stringify({ status: 'FAIL', error: String(error), stack: (error as Error).stack, completed: report }, null, 2);
+    output.textContent = JSON.stringify({ status: 'FAIL', error: String(error), stack: (error as Error).stack, failures, completed: report }, null, 2);
   } finally { runtime.destroy(); restored?.destroy(); }
 };
