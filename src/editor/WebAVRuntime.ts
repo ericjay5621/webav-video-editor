@@ -1539,7 +1539,7 @@ export class WebAVRuntime {
     this.items.splice(itemIndex, 1, ...nextItems);
     this.notifyItems();
     this.select(nextItems[1].id);
-    await this.seek(this.currentTimeUs);
+    await this.refreshPreviewWithSelection(nextItems[1].id, nextItems[1].sprite);
     const nextStates = nextItems.map((nextItem) => this.captureItemSpriteState(nextItem));
     this.recordHistory({
       label: '分割素材',
@@ -2788,8 +2788,13 @@ export class WebAVRuntime {
       });
     this.restoreSpriteAnimations();
     this.notifyItems();
-    this.select(selectedId);
-    await this.seek(seekUs);
+    const selectedItem = this.items.find((candidate) => candidate.id === selectedId);
+    this.select(selectedItem ? selectedItem.id : null);
+    if (selectedItem) {
+      await this.refreshPreviewWithSelection(selectedItem.id, selectedItem.sprite, seekUs);
+    } else {
+      await this.seek(seekUs);
+    }
   }
 
   private async replaceTextSprite(
@@ -3196,14 +3201,25 @@ export class WebAVRuntime {
     return difference / length;
   }
 
-  private async refreshPreviewWithSelection(id: string, sprite: VisibleSprite) {
+  private async refreshPreviewWithSelection(
+    id: string,
+    sprite: VisibleSprite,
+    seekUs = this.currentTimeUs,
+  ) {
     this.preserveSelection = true;
     try {
-      await this.seek(this.currentTimeUs);
+      // AVCanvas rounds its timeupdate events and clears activeSprite outside
+      // its time range. History still owns the selection at a fractional split
+      // boundary (or when the playhead has since moved outside the item).
+      await this.seek(seekUs);
     } finally {
-      this.preserveSelection = false;
-      if (this.canvas && this.selectedId === id) {
-        this.canvas.activeSprite = sprite;
+      try {
+        const item = this.items.find((candidate) => candidate.id === id && candidate.sprite === sprite);
+        if (this.canvas && this.selectedId === id && item) {
+          this.canvas.activeSprite = item.kind === 'audio' ? null : sprite;
+        }
+      } finally {
+        this.preserveSelection = false;
       }
     }
   }
